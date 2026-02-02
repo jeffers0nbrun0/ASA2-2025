@@ -1,0 +1,15 @@
+#/etc/systemd/system/clamd-custom.service 
+[Unit]
+Description=ClamAV Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=clamav
+Group=clamav
+ExecStart=/usr/sbin/clamd --config-file=/etc/clamav/clamd.conf --foreground=true
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

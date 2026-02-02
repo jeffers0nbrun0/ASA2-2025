@@ -1,0 +1,126 @@
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+
+# Cadeias customizadas
+:PROTECAO_SSH - [0:0]
+:TRAFEGO_INTERNO - [0:0]
+
+# Logs separados (para syslog central)
+:LOG_DROP_IN - [0:0]
+:LOG_DROP_FWD - [0:0]
+:LOG_SSH - [0:0]
+
+# -------------------------
+# LOGS (com rate-limit)
+# -------------------------
+
+# DROP de INPUT
+-A LOG_DROP_IN -m limit --limit 6/min --limit-burst 10 -j LOG --log-prefix "FWALL DROP_IN " --log-level 4
+-A LOG_DROP_IN -j DROP
+
+# DROP de FORWARD
+-A LOG_DROP_FWD -m limit --limit 6/min --limit-burst 10 -j LOG --log-prefix "FWALL DROP_FWD " --log-level 4
+-A LOG_DROP_FWD -j DROP
+
+# DROP por proteção SSH (ban/abuso)
+-A LOG_SSH -m limit --limit 6/min --limit-burst 10 -j LOG --log-prefix "FWALL SSH " --log-level 4
+-A LOG_SSH -j DROP
+
+# -------------------------
+# INPUT (Firewall em si)
+# -------------------------
+
+# Loopback
+-A INPUT -i lo -j ACCEPT
+
+# Conexões estabelecidas/relacionadas
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Pacotes inválidos
+-A INPUT -m conntrack --ctstate INVALID -j LOG_DROP_IN
+
+# ICMP controlado (ping) - opcional, mas útil
+-A INPUT -p icmp --icmp-type echo-request -m limit --limit 2/second --limit-burst 6 -j ACCEPT
+
+# SSH de gerência pela WAN/gerência (enp0s3) - NÃO derruba teu acesso
+# Ajuste a porta se necessário (ex.: 2222)
+-A INPUT -i enp0s3 -p tcp --dport 22 -m conntrack --ctstate NEW -j PROTECAO_SSH
+-A INPUT -i enp0s3 -p tcp --dport 22 -j ACCEPT
+
+# (Opcional) SSH pela LAN também (descomente se quiser)
+#-A INPUT -i enp0s8 -p tcp --dport 22 -m conntrack --ctstate NEW -j PROTECAO_SSH
+#-A INPUT -i enp0s8 -p tcp --dport 22 -j ACCEPT
+
+# Permitir tráfego da LAN (servidores 10.0.0.0/24) para serviços no firewall
+# Se quiser travar mais, substitui por regras específicas (DNS, NTP, etc.)
+-A INPUT -i enp0s8 -s 10.0.0.0/24 -j ACCEPT
+
+# Default: loga e dropa o resto do INPUT
+-A INPUT -j LOG_DROP_IN
+
+# -------------------------
+# FORWARD (roteamento LAN <-> WAN)
+# -------------------------
+
+# Conexões estabelecidas/relacionadas
+-A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Pacotes inválidos
+-A FORWARD -m conntrack --ctstate INVALID -j LOG_DROP_FWD
+
+# Tráfego interno LAN <-> LAN
+-A FORWARD -i enp0s8 -o enp0s8 -s 10.0.0.0/24 -d 10.0.0.0/24 -j TRAFEGO_INTERNO
+
+# LAN -> WAN (internet)
+-A FORWARD -i enp0s8 -o enp0s3 -s 10.0.0.0/24 -j ACCEPT
+
+# Default: loga e dropa o resto do FORWARD
+-A FORWARD -j LOG_DROP_FWD
+
+# -------------------------
+# TRAFEGO_INTERNO
+# -------------------------
+-A TRAFEGO_INTERNO -j ACCEPT
+
+# -------------------------
+# PROTECAO_SSH
+# Proteções:
+# - ban por 1h se muitas tentativas (recent)
+# - limite de conexões simultâneas por IP (connlimit)
+# - limite de NEW por IP (hashlimit)
+# -------------------------
+
+# Se já está banido (1 hora), dropa
+-A PROTECAO_SSH -m recent --name SSHBAN --rcheck --seconds 3600 -j LOG_SSH
+
+# Limite de conexões simultâneas por IP (evita abuso mantendo sessões abertas)
+-A PROTECAO_SSH -m connlimit --connlimit-above 4 --connlimit-mask 32 -j LOG_SSH
+
+# Marca tentativa (cada NEW conta)
+-A PROTECAO_SSH -m recent --name SSHATT --set
+
+# Bloqueio progressivo:
+# 12 tentativas em 5 min => entra no ban (1h) e derruba
+-A PROTECAO_SSH -m recent --name SSHATT --update --seconds 300 --hitcount 12 -m recent --name SSHBAN --set -j LOG_SSH
+
+# Mitigação de SYN flood/bruteforce no SSH:
+# Limita conexões NEW por IP (se estiver ok, retorna e o INPUT aceita)
+-A PROTECAO_SSH -m hashlimit --hashlimit-name sshnew --hashlimit 15/min --hashlimit-burst 30 --hashlimit-mode srcip --hashlimit-srcmask 32 -j RETURN
+
+# Acima do limite => log/drop
+-A PROTECAO_SSH -j LOG_SSH
+
+COMMIT
+
+*nat
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+
+# NAT da LAN para a WAN (internet)
+-A POSTROUTING -s 10.0.0.0/24 -o enp0s3 -j MASQUERADE
+
+COMMIT
